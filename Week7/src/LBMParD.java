@@ -1,0 +1,492 @@
+import java.util.concurrent.CyclicBarrier ;
+
+public class LBMParD extends Thread{
+
+    final static int NITER = 1000 ;
+    //final static int NITER = 5000 ;
+
+    final static int P = 16;
+    static CyclicBarrier barrier = new CyclicBarrier(P) ;
+    final static int NX = 1040, NY = 360 ;  // Lattice dimensions
+    final static int Q = 9 ;  // num states
+
+    final static double uLB = 0.06 ;  // Inlet velocity in lattice units
+
+    ///final static double Re = 330.0 ;  // Reynolds number
+    final static double Re = 100 ;  // Reynolds number
+
+    // useful constants for weights
+
+    final static double W0 = 4.0 / 9 ;
+    final static double W1 = 1.0 / 9 ;
+    final static double W2 = 1.0 / 36 ;
+
+    final static int CELL_SIZE = 2 ;
+    final static int OUTPUT_FREQ = 50 ;
+
+    static int [] [] c = new int [Q] [2] ;  // Lattice velocities
+    static double [] w = new double [Q] ;  // Lattice weights
+
+    static double [] [] [] u = new double [NX] [NY] [2] ;
+
+    static boolean [] [] obstacle = new boolean [NX] [NY] ;
+
+    static double [] [] [] fin = new double [NX] [NY] [Q] ;
+    static double [] [] rho = new double [NX] [NY] ;
+    static int [] vStates = new int [] {0, -1, +1} ;
+    static double [] [] vel = new double [NY] [2] ;
+    static int [] i1 = new int [3], i2 = new int [3], i3 = new int [3] ;
+    static long macroTime = 0 ;
+    static long collisionTime = 0 ;
+    static long streamingTime = 0 ;
+    static double cx = NX/4.0, cy = NY/2.0, r = 20 ;
+    static double nulb = uLB * r / Re ;
+    static double [] [] [] fout = new double [NX] [NY] [Q] ;
+    static int [] noslip = new int [Q] ;  // index in c of negative velocity state
+    static double omega = 1.0 / (3 * nulb + 0.5) ;  // Relaxation parameter
+
+    static long time1, time2, time3, time4;
+
+    public static <bool> void main(String args []) throws Exception {
+        // Coordinates and size of obstacle.
+        long startTime = System.currentTimeMillis();
+        // Define table c of velocity states
+        int pos = 0 ;
+        for(int i : vStates)
+            for(int j : vStates) {
+                int [] cEl = c [pos++] ;
+                cEl [0] = i ;
+                cEl [1] = j ;
+            }
+
+        // Define table w of weights for equilibrium distribution
+        w [0] = W0 ;
+        for(int i = 1 ; i < Q ; i++) {
+            int [] cEl = c [i] ;
+            if(cEl [0] == 0 || cEl [1] == 0) {
+                w [i] = W1 ;
+            }
+            else {
+                w [i] = W2 ;
+            }
+        }
+
+
+        for(int i = 0 ; i < Q ; i++) {
+            int [] cEl = c [i] ;
+            for(int j = 0 ; j < Q ; j++) {
+                int [] cElj = c [j] ;
+                if(cElj [0] == -cEl [0] && cElj [1] == -cEl [1]) {
+                    noslip [i] = j ;
+                }
+            }
+        }
+
+
+        int i1pos = 0, i2pos = 0, i3pos = 0 ;
+        for(int i = 0 ; i < Q ; i++) {
+            int cElX = c [i] [0] ;
+            if (cElX < 0) {
+                i1 [i1pos++] = i ;
+            }
+            else if (cElX == 0) {
+                i2 [i2pos++] = i ;
+            }
+            else {
+                i3 [i3pos++] = i ;
+            }
+        }
+        
+        
+        // Cylindrical obstacle
+        double r2 = r * r ;
+        for(int i = 0 ; i < NX ; i++) {
+            for(int j = 0 ; j < NY ; j++) {
+                double dx = i - cx ;
+                double dy = j - cy ;
+                obstacle [i] [j] = (dx * dx + dy * dy) < r2 ;
+            }
+        }/* */
+
+        /*
+        // Rectangular obstacle
+        double width = 50; // Width of the rectangle
+        double height = 40; // Height of the rectangle
+        double xCenter = NX/4 + 25; // x-coordinate of the center of the rectangle
+        double yCenter = NY/2; // y-coordinate of the center of the rectangle
+
+        for(int i = 0 ; i < NX ; i++) {
+            for(int j = 0 ; j < NY ; j++) {
+                double dx = abs(i - xCenter);
+                double dy = abs(j - yCenter);
+                obstacle [i] [j] = obstacle [i] [j] || (dx <= width/2 && dy <= height/2);
+            }
+        }
+        /**/
+        
+        // Mandelbrot obstacle
+        /*
+        double height = NY/3;
+        double width = height;
+        int maxIterations = 50; // maximum number of iterations before assuming a point is not in the set
+        double xmin = -2.0; // minimum x-coordinate of the complex plane
+        double xmax = 1.0; // maximum x-coordinate of the complex plane
+        double ymin = -1.5; // minimum y-coordinate of the complex plane
+        double ymax = 1.5; // maximum y-coordinate of the complex plane
+        double dx = (xmax - xmin) / width; // x-increment between pixels
+        double dy = (ymax - ymin) / height; // y-increment between pixels
+        for (int i = 0; i < width; i++) {
+            for (int j = 0; j < height; j++) {
+                double x0 = xmin + i * dx;
+                double y0 = ymin + j * dy;
+                double x = 0.0;
+                double y = 0.0;
+                int iteration = 0;
+                while (x*x + y*y <= 4.0 && iteration < maxIterations) {
+                    double xTemp = x*x - y*y + x0;
+                    y = 2.0 * x * y + y0;
+                    x = xTemp;
+                    iteration++;
+                }
+                obstacle[i][j] = (iteration == maxIterations);
+            }
+        }
+        */
+        
+        /*
+        // Small gap obstacle
+        double gap = 40; // Width of the rectangle
+        double width = 40; // Height of the rectangle
+        double xCenter = NX/4; // x-coordinate of the center of the rectangle
+        double yCenter = NY/2; // y-coordinate of the center of the rectangle
+
+        for(int i = 0 ; i < NX ; i++) {
+            for(int j = 0 ; j < NY ; j++) {
+                double dx = abs(i - xCenter);
+                double dy = abs(j - yCenter);
+                obstacle [i] [j] = (dx <= width/2 && dy%50 >= gap);
+            }
+        }/**/
+
+        /*
+        // Small gap obstacle
+        double gap = 20; // Width of the rectangle
+        double width = 40; // Height of the rectangle
+        double xCenter = NX/4; // x-coordinate of the center of the rectangle
+        double yCenter = NY/2; // y-coordinate of the center of the rectangle
+        double margin = 20; // Margin from the top and bottom edges
+
+        for(int i = 0 ; i < NX ; i++) {
+            for(int j = 0 ; j < NY ; j++) {
+                double dx = abs(i - xCenter);
+                double dy = abs(j - yCenter);
+                obstacle [i] [j] = (dx <= width/2 && (dy < gap || dy > NY - gap)) || ((dx <= width/2) && (j < margin || j > NY - margin));
+            }
+        }
+        /* */
+
+        // Car obstacle
+        /*
+        double length = 90; // Length of the car
+        double width = 50; // Width of the car
+        double xCenter = NX/4; // x-coordinate of the center of the car
+        double yCenter = NY/2; // y-coordinate of the center of the car
+        double wheelRadius = 10; // Radius of the wheels
+        double wheelOffset = 20; // Offset of the wheels from the center
+
+        for(int i = 0 ; i < NX ; i++) {
+            for(int j = 0 ; j < NY ; j++) {
+                double dx = abs(i - xCenter);
+                double dy = abs(j - yCenter);
+                double distance1 = Math.sqrt((dx - length/2 + wheelOffset)*(dx - length/2 + wheelOffset) + (dy - width/2)*(dy - width/2)); // Distance from the front left wheel
+                double distance2 = Math.sqrt((dx - length/2 + wheelOffset)*(dx - length/2 + wheelOffset) + (dy + width/2)*(dy + width/2)); // Distance from the front right wheel
+                double distance3 = Math.sqrt((dx + length/2 - wheelOffset)*(dx + length/2 - wheelOffset) + (dy - width/2)*(dy - width/2)); // Distance from the back left wheel
+                double distance4 = Math.sqrt((dx + length/2 - wheelOffset)*(dx + length/2 - wheelOffset) + (dy + width/2)*(dy + width/2)); // Distance from the back right wheel
+                obstacle [i] [j] = (dx <= length/2 && dy <= width/2) || (distance1 <= wheelRadius) || (distance2 <= wheelRadius) || (distance3 <= wheelRadius) || (distance4 <= wheelRadius); // Create a rectangle with four circles
+            }
+        }/* */
+
+
+        // Inlet velocity with perturbation
+        for(int j = 0 ; j < NY ; j++) {
+            vel [j] [0] = uLB *
+                    (1 + 1E-4 * Math.sin(2 * Math.PI * j / (NY - 1))) ;
+        }
+
+
+        for(int i = 0 ; i < NX ; i++) {
+            for(int j = 0 ; j < NY ; j++) {
+                if(i == 0) {
+                    equilibrium(fin [i] [j], 1.0, vel [j] [0], vel [j] [1]) ;
+                }
+                else {
+                    equilibrium(fin [i] [j], 1.0, 0.0, 0.0) ;
+                }
+            }
+        }
+
+
+        LBMParD [] threads = new LBMParD [P] ;
+        for(int me = 0 ; me < P ; me++) {
+            threads [me] = new LBMParD(me) ;
+            threads [me].start() ;
+        }
+
+        for(int me = 0 ; me < P ; me++) {
+            threads [me].join() ;
+        }
+
+
+        long endTime = System.currentTimeMillis();
+
+        System.out.println("Calculation completed in " +
+                (endTime - startTime) + " milliseconds");
+
+        System.out.println("Time to calculate macroscopic quantities: " +
+                macroTime + " milliseconds");
+        System.out.println("Time for collision steps: " +
+                collisionTime + " milliseconds");
+        System.out.println("Time for streaming steps: " +
+                streamingTime + " milliseconds");
+
+    }
+
+    int me;
+    LBMParD(int me){
+        this.me = me;
+    }
+
+    public void run(){
+
+        int blockSize = (NX + P - 1) / P;
+        int startIndex = me * blockSize;
+        int endIndex = Math.min(startIndex + blockSize, NX);
+
+        for(int time = 0 ; time < NITER ; time++) {
+            
+            if (me == 0){
+                time1 = System.currentTimeMillis();
+            }
+
+            // Calculate macroscopic density and velocity
+            //for(int i = me ; i < NX ; i+=P) {
+            for (int i = startIndex; i < endIndex; i++) {
+                for(int j = 0 ; j < NY ; j++) {
+                    double [] fin_ij = fin [i] [j] ;
+                    double [] u_ij = u [i] [j] ;
+                    if(i > 0) {
+                        /*float sum = 0, sum0 = 0, sum1 = 0 ;
+                        for(int d = 0; d < Q ; d++) {
+                            sum += fin_ij [d] ;
+                            sum0 += c [d] [0] * fin_ij [d] ;
+                            sum1 += c [d] [1] * fin_ij [d] ;
+                        }*/
+
+
+                        // UNROLLED version of above loop over d
+                        double sum = fin_ij [0] + fin_ij [1] + fin_ij [2] +
+                                fin_ij [3] + fin_ij [4] + fin_ij [5] +
+                                fin_ij [6] + fin_ij [7] + fin_ij [8] ;
+
+                        double sum0 = - fin_ij [3] - fin_ij [4] - fin_ij [5]
+                                + fin_ij [6] + fin_ij [7] + fin_ij [8] ;
+
+                        double sum1 = - fin_ij [1] + fin_ij [2] - fin_ij [4]
+                                + fin_ij [5] - fin_ij [7] + fin_ij [8] ;
+
+
+                        rho [i] [j] = sum ;
+                        if(sum > 0) {
+                            u_ij [0] = sum0 / sum ;
+                            u_ij [1] = sum1 / sum ;
+                        }
+                    }
+                    else {
+                        // BC - left wall: compute density from known
+                        // populations.
+
+                        u_ij [0] = vel [j] [0] ;
+                        u_ij [1] = vel [j] [1] ;
+                        float sum2 = 0 ;
+                        for(int d : i2) {
+                            sum2 += fin_ij [d] ;
+                        }
+                        float sum1 = 0 ;
+                        for(int d : i1) {
+                            sum1 += fin_ij [d] ;
+                        }
+                        rho [0] [j] = 1/(1 - u_ij [0]) * (sum2 + 2 * sum1) ;
+                    }
+                }
+            }
+
+            if (me == 0){
+                time2 = System.currentTimeMillis();
+
+                macroTime += (time2 - time1) ;
+            }
+
+            // Collision step.
+            //for(int i = me ; i < NX ; i+=P) {
+            for (int i = startIndex; i < endIndex; i++) {
+                for(int j = 0 ; j < NY ; j++) {
+                    double [] fin_ij = fin [i] [j] ;
+                    double [] fout_ij = fout [i] [j] ;
+                    if(obstacle [i] [j]) {
+                        // BC - no slip at obstacle
+                        for(int d = 0; d < Q ; d++) {
+                            fout_ij [d] = fin_ij [noslip [d]] ;
+                        }
+                    }
+                    else {
+                        double [] feq = new double [Q] ;
+
+                        equilibrium(feq,
+                                rho [i] [j], u [i] [j] [0], u [i] [j] [1]) ;
+
+                        // BC - Left wall: Equilibrium scheme
+                        if(i == 0) {
+                            for(int p = 0 ; p < 3 ; p++) {
+                                fin_ij [i3 [p]] = feq [i3 [p]] ;
+                            }
+                        }
+                        /*for(int d = 0; d < Q ; d++) {
+                            fout_ij [d] = fin_ij [d] -
+                                    omega * (fin_ij [d] - feq [d]) ;
+                        }*/
+
+
+                        // UNROLLED version of above loop over d
+                        fout_ij [0] = fin_ij [0] -
+                                omega * (fin_ij [0] - feq [0]) ;
+                        fout_ij [1] = fin_ij [1] -
+                                omega * (fin_ij [1] - feq [1]) ;
+                        fout_ij [2] = fin_ij [2] -
+                                omega * (fin_ij [2] - feq [2]) ;
+                        fout_ij [3] = fin_ij [3] -
+                                omega * (fin_ij [3] - feq [3]) ;
+                        fout_ij [4] = fin_ij [4] -
+                                omega * (fin_ij [4] - feq [4]) ;
+                        fout_ij [5] = fin_ij [5] -
+                                omega * (fin_ij [5] - feq [5]) ;
+                        fout_ij [6] = fin_ij [6] -
+                                omega * (fin_ij [6] - feq [6]) ;
+                        fout_ij [7] = fin_ij [7] -
+                                omega * (fin_ij [7] - feq [7]) ;
+                        fout_ij [8] = fin_ij [8] -
+                                omega * (fin_ij [8] - feq [8]) ;
+
+                    }
+                }
+            }
+
+            synch();
+
+            if (me == 0){
+                time3 = System.currentTimeMillis();
+
+                collisionTime += (time3 - time2) ;
+            }
+
+            // Streaming step.
+            //for(int i = me ; i < NX ; i+=P) {
+            for (int i = startIndex; i < endIndex; i++) {
+
+                int iP1 = (i + 1) % NX;
+                int iM1 = (i - 1 + NX) % NX;
+
+                double[][] fin_i = fin[i];
+                double[][] fin_iM1 = fin[iM1];
+                double[][] fin_iP1 = fin[iP1];
+
+                for (int j = 0; j < NY; j++) {
+                    double[] fout_ij = fout[i][j];
+                    /*for(int d = 0; d < Q ; d++) {
+                        int i_shf = (i + c [d] [0] + NX) % NX ;
+                        int j_shf = (j + c [d] [1] + NY) % NY ;
+                        fin [i_shf] [j_shf] [d] = fout_ij [d] ;
+                    }*/
+
+
+                    // UNROLLED version of above loop over d
+                    int jP1 = (j + 1) % NY;
+                    int jM1 = (j - 1 + NY) % NY;
+
+                    fin_i[j][0] = fout_ij[0];
+                    fin_i[jM1][1] = fout_ij[1];
+                    fin_i[jP1][2] = fout_ij[2];
+                    fin_iM1[j][3] = fout_ij[3];
+                    fin_iM1[jM1][4] = fout_ij[4];
+                    fin_iM1[jP1][5] = fout_ij[5];
+                    fin_iP1[j][6] = fout_ij[6];
+                    fin_iP1[jM1][7] = fout_ij[7];
+                    fin_iP1[jP1][8] = fout_ij[8];
+
+                }
+            }
+
+            synch();
+
+            // BC - Right wall: outflow condition
+            for(int d : i1) {
+                for(int j = me ; j < NY ; j+=P) {
+                    fin [NX - 1] [j] [d] = fin [NX - 2] [j] [d] ;
+                }
+            }
+
+            synch();
+
+            if (me == 0){
+                time4 = System.currentTimeMillis();
+
+                streamingTime += (time4 - time3) ;
+                if(time % OUTPUT_FREQ == 0) {
+                    System.out.println("time = " + time + "/" + NITER) ;
+                }
+            }
+        }
+    }
+
+    static void synch() {
+        try {
+            barrier.await() ;
+        }
+        catch(Exception e) {
+            e.printStackTrace() ;
+            System.exit(1) ;
+        }
+    }
+
+
+    static void equilibrium(double [] feq, double rho, double u0, double u1) {
+
+        double usqr = u0 * u0 + u1 * u1 ;
+
+        /*for(int d = 0; d < Q ; d++) {
+            int [] cEl = c [d] ;
+            double cElu = cEl [0] * u0 + cEl [1] * u1 ;
+            feq [d] = rho * w [d] * (1.0 + 3.0 * cElu +
+                                     4.5 * cElu * cElu - 1.5 * usqr) ;
+        }*/
+
+        // UNROLLED version of above loop over d
+        double u0Pu1 = u0 + u1 ;
+        double u0Mu1 = u0 - u1 ;
+
+        feq [0] = rho * W0 * (1.0 - 1.5 * usqr) ;
+        feq [1] = rho * W1 * (1.0 - 3.0 * u1 + 4.5 * u1 * u1 - 1.5 * usqr) ;
+        feq [2] = rho * W1 * (1.0 + 3.0 * u1 + 4.5 * u1 * u1 - 1.5 * usqr) ;
+        feq [3] = rho * W1 * (1.0 - 3.0 * u0 + 4.5 * u0 * u0 - 1.5 * usqr) ;
+        feq [4] = rho * W2 * (1.0 - 3.0 * u0Pu1 +
+                4.5 * u0Pu1 * u0Pu1 - 1.5 * usqr) ;
+        feq [5] = rho * W2 * (1.0 - 3.0 * u0Mu1 +
+                4.5 * u0Mu1 * u0Mu1 - 1.5 * usqr) ;
+        feq [6] = rho * W1 * (1.0 + 3.0 * u0 + 4.5 * u0 * u0 - 1.5 * usqr) ;
+        feq [7] = rho * W2 * (1.0 + 3.0 * u0Mu1 +
+                4.5 * u0Mu1 * u0Mu1 - 1.5 * usqr) ;
+        feq [8] = rho * W2 * (1.0 + 3.0 * u0Pu1 +
+                4.5 * u0Pu1 * u0Pu1 - 1.5 * usqr) ;
+
+    }
+
+}
